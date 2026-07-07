@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'vault_screen.dart';
 
 class CalculatorScreen extends StatefulWidget {
   const CalculatorScreen({super.key});
@@ -15,6 +16,9 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
   String? _operator;
   bool _shouldResetDisplay = false;
   bool _hasError = false;
+
+  String _rawDigits = '';
+  static const String _secretCode = '0101';
 
   static const int _maxSignificantDigits = 10;
 
@@ -37,54 +41,49 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     return result;
   }
 
-  double? _tryParseDisplay() {
-    return double.tryParse(_display);
-  }
+  double? _tryParseDisplay() => double.tryParse(_display);
 
   void _onButtonPressed(String value) {
+    if (value == 'C') {
+      setState(_resetAll);
+      return;
+    }
+
+    if (_hasError) return;
+
+    if (value == '=') {
+      if (_operator == null &&
+          _firstOperand == null &&
+          _rawDigits == _secretCode) {
+        _navigateToVault();
+        return;
+      }
+      setState(_handleEquals);
+      return;
+    }
+
     setState(() {
-      if (value == 'C') {
-        _resetAll();
-        return;
-      }
-
-      if (_hasError) {
-        return;
-      }
-
       if (value == '⌫') {
         _handleBackspace();
-        return;
-      }
-
-      if (value == '±') {
+      } else if (value == '±') {
         _handleToggleSign();
-        return;
-      }
-
-      if (value == '%') {
+      } else if (value == '%') {
         _handlePercent();
-        return;
-      }
-
-      if (value == '.') {
+      } else if (value == '.') {
         _handleDecimalPoint();
-        return;
-      }
-
-      if (['÷', '×', '−', '+'].contains(value)) {
+      } else if (['÷', '×', '−', '+'].contains(value)) {
         _handleOperator(value);
-        return;
+      } else {
+        _handleDigit(value);
       }
-
-      if (value == '=') {
-        _handleEquals();
-        return;
-      }
-
-      // Обычная цифра
-      _handleDigit(value);
     });
+  }
+
+  Future<void> _navigateToVault() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const VaultScreen()),
+    );
+    setState(_resetAll);
   }
 
   void _resetAll() {
@@ -94,14 +93,17 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     _operator = null;
     _shouldResetDisplay = false;
     _hasError = false;
+    _rawDigits = '';
   }
 
   void _handleDigit(String digit) {
     if (_shouldResetDisplay) {
       _display = digit;
+      _rawDigits = digit;
       _shouldResetDisplay = false;
     } else {
       _display = (_display == '0') ? digit : _display + digit;
+      _rawDigits += digit;
     }
   }
 
@@ -109,19 +111,21 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     if (_shouldResetDisplay) {
       _display = '0.';
       _shouldResetDisplay = false;
-      return;
-    }
-    if (!_display.contains('.')) {
+    } else if (!_display.contains('.')) {
       _display += '.';
     }
+    _rawDigits = ''; 
   }
 
   void _handleBackspace() {
-    if (_shouldResetDisplay) return; // после оператора backspace не трогает старое число
+    if (_shouldResetDisplay) return;
     if (_display.length > 1) {
       _display = _display.substring(0, _display.length - 1);
     } else {
       _display = '0';
+    }
+    if (_rawDigits.isNotEmpty) {
+      _rawDigits = _rawDigits.substring(0, _rawDigits.length - 1);
     }
   }
 
@@ -129,12 +133,14 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     final value = _tryParseDisplay();
     if (value == null) return;
     _display = _formatNumber(value * -1);
+    _rawDigits = '';
   }
 
   void _handlePercent() {
     final value = _tryParseDisplay();
     if (value == null) return;
     _display = _formatNumber(value / 100);
+    _rawDigits = '';
   }
 
   void _handleOperator(String op) {
@@ -157,6 +163,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
 
     _operator = op;
     _shouldResetDisplay = true;
+    _rawDigits = '';
   }
 
   void _handleEquals() {
@@ -171,12 +178,14 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
       return;
     }
 
-    _expression = '${_formatNumber(_firstOperand!)} $_operator ${_formatNumber(currentValue)} =';
+    _expression =
+        '${_formatNumber(_firstOperand!)} $_operator ${_formatNumber(currentValue)} =';
     _display = _formatNumber(result);
 
     _firstOperand = null;
     _operator = null;
     _shouldResetDisplay = true;
+    _rawDigits = '';
   }
 
   double? _calculate(double a, double b, String op) {
@@ -188,7 +197,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
       case '×':
         return a * b;
       case '÷':
-        if (b == 0) return null; // деление на ноль → ошибка
+        if (b == 0) return null;
         return a / b;
       default:
         return null;
@@ -202,6 +211,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     _firstOperand = null;
     _operator = null;
     _shouldResetDisplay = false;
+    _rawDigits = '';
   }
 
   @override
@@ -249,7 +259,8 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
             Expanded(
               flex: 5,
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 child: Column(
                   children: [
                     _buildRow(['C', '⌫', '%', '÷']),
@@ -283,9 +294,8 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     Color textColor = Colors.white;
 
     if (isOperator) {
-      bgColor = label == '='
-          ? const Color(0xFF0A84FF)
-          : const Color(0xFF2C2C2E);
+      bgColor =
+          label == '=' ? const Color(0xFF0A84FF) : const Color(0xFF2C2C2E);
       textColor = label == '=' ? Colors.white : const Color(0xFF0A84FF);
     } else if (isFunction) {
       bgColor = const Color(0xFF3A3A3C);
@@ -294,7 +304,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
       bgColor = const Color(0xFF232325);
     }
 
-    // Подсветка активного оператора (нажат, но операнд ещё не введён)
     final bool isActiveOperator = isOperator &&
         label != '=' &&
         _operator == label &&
