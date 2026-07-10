@@ -5,14 +5,16 @@ enum VaultCategoryType { photos, videos, documents, other }
 class VaultCategory {
   final VaultCategoryType type;
   final String label;
-  final String icon;
 
-  const VaultCategory({
-    required this.type,
-    required this.label,
-    required this.icon,
-  });
+  const VaultCategory({required this.type, required this.label});
 }
+
+const List<VaultCategory> vaultCategories = [
+  VaultCategory(type: VaultCategoryType.photos, label: 'Photos'),
+  VaultCategory(type: VaultCategoryType.videos, label: 'Videos'),
+  VaultCategory(type: VaultCategoryType.documents, label: 'Documents'),
+  VaultCategory(type: VaultCategoryType.other, label: 'Other'),
+];
 
 VaultCategoryType detectCategoryForExtension(String extension) {
   final ext = extension.toLowerCase().replaceAll('.', '');
@@ -54,7 +56,6 @@ class VaultFileMeta extends HiveObject {
       DateTime.fromMillisecondsSinceEpoch(dateAddedMillis);
 }
 
-/// Ручной TypeAdapter — без кодогенерации build_runner.
 class VaultFileMetaAdapter extends TypeAdapter<VaultFileMeta> {
   @override
   final int typeId = 0;

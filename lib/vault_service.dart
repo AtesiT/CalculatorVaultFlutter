@@ -9,6 +9,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
+import 'package:video_thumbnail/video_thumbnail.dart';
 
 import 'models.dart';
 
@@ -37,7 +38,7 @@ class VaultService {
 
   Box<VaultFileMeta> get _box {
     if (_metaBox == null) {
-      throw StateError('VaultService не инициализирован. Вызовите init().');
+      throw StateError('VaultService is not initialized. Call init().');
     }
     return _metaBox!;
   }
@@ -124,11 +125,9 @@ class VaultService {
     return result?.files ?? [];
   }
 
-  Future<VaultFileMeta> _importSingleFile(
-    PlatformFile platformFile,
-  ) async {
+  Future<VaultFileMeta> _importSingleFile(PlatformFile platformFile) async {
     if (platformFile.path == null) {
-      throw Exception('Путь к файлу недоступен: ${platformFile.name}');
+      throw Exception('File path unavailable: ${platformFile.name}');
     }
 
     final sourceFile = File(platformFile.path!);
@@ -173,7 +172,6 @@ class VaultService {
     return results;
   }
 
-
   List<VaultFileMeta> getAllFiles() => _box.values.toList();
 
   List<VaultFileMeta> getFilesByCategory(VaultCategoryType category) =>
@@ -185,6 +183,46 @@ class VaultService {
       counts[meta.category] = (counts[meta.category] ?? 0) + 1;
     }
     return counts;
+  }
+
+  Future<Uint8List> getDecryptedBytes(String id) async {
+    final vaultDir = await getVaultDirectory();
+    final vaultFile = File(p.join(vaultDir.path, id));
+    return readDecryptedBytes(vaultFile);
+  }
+
+  Future<File> prepareTempPlaybackFile(String id, String extension) async {
+    final vaultDir = await getVaultDirectory();
+    final vaultFile = File(p.join(vaultDir.path, id));
+    final decrypted = await readDecryptedBytes(vaultFile);
+
+    final tempDir = await getTemporaryDirectory();
+    final suffix = extension.isNotEmpty ? '.$extension' : '';
+    final tempFile = File(p.join(tempDir.path, '$id$suffix'));
+
+    await tempFile.writeAsBytes(decrypted, flush: true);
+    return tempFile;
+  }
+
+  Future<void> deleteTempFile(File file) async {
+    if (await file.exists()) {
+      await file.delete();
+    }
+  }
+
+  Future<Uint8List?> getVideoThumbnail(String id, String extension) async {
+    final tempFile = await prepareTempPlaybackFile(id, extension);
+    try {
+      final bytes = await VideoThumbnail.thumbnailData(
+        video: tempFile.path,
+        imageFormat: ImageFormat.JPEG,
+        maxWidth: 250,
+        quality: 60,
+      );
+      return bytes;
+    } finally {
+      await deleteTempFile(tempFile);
+    }
   }
 
   Future<void> deletePhysicalFile(File vaultFile) async {
