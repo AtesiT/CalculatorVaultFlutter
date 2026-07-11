@@ -20,6 +20,37 @@ IconData _iconForCategory(VaultCategoryType type) {
   }
 }
 
+Future<bool> confirmDelete(BuildContext context, int count) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Text(
+        count > 1 ? 'Delete Files' : 'Delete File',
+        style: const TextStyle(color: Colors.white),
+      ),
+      content: Text(
+        count > 1
+            ? 'Are you sure you want to permanently delete these $count files? This action cannot be undone.'
+            : 'Are you sure you want to permanently delete this file? This action cannot be undone.',
+        style: TextStyle(color: Colors.grey[300]),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Delete', style: TextStyle(color: Colors.redAccent)),
+        ),
+      ],
+    ),
+  );
+  return result ?? false;
+}
+
 class ImportProgress {
   final int completed;
   final int total;
@@ -277,40 +308,136 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
   final Map<String, Future<Uint8List>> _photoCache = {};
   final Map<String, Future<Uint8List?>> _videoThumbCache = {};
 
+  late List<VaultFileMeta> _files;
+  bool _selectionMode = false;
+  final Set<String> _selectedIds = {};
+
   bool get _isMediaGrid =>
       widget.category.type == VaultCategoryType.photos ||
       widget.category.type == VaultCategoryType.videos;
 
   @override
-  Widget build(BuildContext context) {
-    final files = VaultService.instance.getFilesByCategory(widget.category.type);
+  void initState() {
+    super.initState();
+    _files = VaultService.instance.getFilesByCategory(widget.category.type);
+  }
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF121212),
-      appBar: AppBar(
+  void _enterSelectionMode(String id) {
+    setState(() {
+      _selectionMode = true;
+      _selectedIds.add(id);
+    });
+  }
+
+  void _exitSelectionMode() {
+    setState(() {
+      _selectionMode = false;
+      _selectedIds.clear();
+    });
+  }
+
+  void _toggleSelection(String id) {
+    setState(() {
+      if (_selectedIds.contains(id)) {
+        _selectedIds.remove(id);
+        if (_selectedIds.isEmpty) _selectionMode = false;
+      } else {
+        _selectedIds.add(id);
+      }
+    });
+  }
+
+  Future<void> _deleteSingle(String id) async {
+    final confirmed = await confirmDelete(context, 1);
+    if (!confirmed) return;
+
+    await VaultService.instance.deleteFiles([id]);
+    _photoCache.remove(id);
+    _videoThumbCache.remove(id);
+
+    setState(() {
+      _files.removeWhere((f) => f.id == id);
+    });
+  }
+
+  Future<void> _deleteSelected() async {
+    final confirmed = await confirmDelete(context, _selectedIds.length);
+    if (!confirmed) return;
+
+    final ids = _selectedIds.toList();
+    await VaultService.instance.deleteFiles(ids);
+
+    for (final id in ids) {
+      _photoCache.remove(id);
+      _videoThumbCache.remove(id);
+    }
+
+    setState(() {
+      _files.removeWhere((f) => ids.contains(f.id));
+      _selectionMode = false;
+      _selectedIds.clear();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !_selectionMode,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _selectionMode) {
+          _exitSelectionMode();
+        }
+      },
+      child: Scaffold(
         backgroundColor: const Color(0xFF121212),
-        elevation: 0,
-        title: Text(widget.category.label, style: const TextStyle(color: Colors.white)),
-        iconTheme: const IconThemeData(color: Colors.white),
+        appBar: _selectionMode ? _buildSelectionAppBar() : _buildDefaultAppBar(),
+        body: _files.isEmpty
+            ? Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(_iconForCategory(widget.category.type),
+                        size: 64, color: Colors.grey[700]),
+                    const SizedBox(height: 16),
+                    Text('No files yet',
+                        style: TextStyle(color: Colors.grey[500], fontSize: 16)),
+                  ],
+                ),
+              )
+            : (_isMediaGrid ? _buildMediaGrid() : _buildDocumentList()),
       ),
-      body: files.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(_iconForCategory(widget.category.type),
-                      size: 64, color: Colors.grey[700]),
-                  const SizedBox(height: 16),
-                  Text('No files yet',
-                      style: TextStyle(color: Colors.grey[500], fontSize: 16)),
-                ],
-              ),
-            )
-          : (_isMediaGrid ? _buildMediaGrid(files) : _buildDocumentList(files)),
     );
   }
 
-  Widget _buildMediaGrid(List<VaultFileMeta> files) {
+  PreferredSizeWidget _buildDefaultAppBar() {
+    return AppBar(
+      backgroundColor: const Color(0xFF121212),
+      elevation: 0,
+      title: Text(widget.category.label, style: const TextStyle(color: Colors.white)),
+      iconTheme: const IconThemeData(color: Colors.white),
+    );
+  }
+
+  PreferredSizeWidget _buildSelectionAppBar() {
+    return AppBar(
+      backgroundColor: const Color(0xFF121212),
+      elevation: 0,
+      leading: IconButton(
+        icon: const Icon(Icons.close, color: Colors.white),
+        onPressed: _exitSelectionMode,
+      ),
+      title: Text('${_selectedIds.length} selected',
+          style: const TextStyle(color: Colors.white)),
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+          onPressed: _selectedIds.isEmpty ? null : _deleteSelected,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMediaGrid() {
     return GridView.builder(
       padding: const EdgeInsets.all(16),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -318,19 +445,76 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
         crossAxisSpacing: 8,
         mainAxisSpacing: 8,
       ),
-      itemCount: files.length,
+      itemCount: _files.length,
       itemBuilder: (context, index) {
-        final meta = files[index];
-        return widget.category.type == VaultCategoryType.photos
+        final meta = _files[index];
+        final tile = widget.category.type == VaultCategoryType.photos
             ? _buildPhotoTile(meta)
             : _buildVideoTile(meta);
+
+        if (_selectionMode) return tile;
+
+        return Dismissible(
+          key: ValueKey(meta.id),
+          direction: DismissDirection.horizontal,
+          background: _dismissBackground(Alignment.centerLeft),
+          secondaryBackground: _dismissBackground(Alignment.centerRight),
+          confirmDismiss: (_) => confirmDelete(context, 1),
+          onDismissed: (_) async {
+            await VaultService.instance.deleteFiles([meta.id]);
+            _photoCache.remove(meta.id);
+            _videoThumbCache.remove(meta.id);
+            setState(() => _files.removeWhere((f) => f.id == meta.id));
+          },
+          child: tile,
+        );
       },
     );
   }
 
+  Widget _dismissBackground(Alignment alignment) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.redAccent.withOpacity(0.8),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      alignment: alignment,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: const Icon(Icons.delete, color: Colors.white),
+    );
+  }
+
+  Widget _buildSelectableOverlay(String id, Widget child) {
+    final selected = _selectedIds.contains(id);
+    return GestureDetector(
+      onLongPress: () => _enterSelectionMode(id),
+      onTap: () {
+        if (_selectionMode) {
+          _toggleSelection(id);
+        }
+      },
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Opacity(opacity: selected ? 0.5 : 1.0, child: child),
+          if (_selectionMode)
+            Positioned(
+              top: 6,
+              right: 6,
+              child: Icon(
+                selected ? Icons.check_circle : Icons.radio_button_unchecked,
+                color: selected ? const Color(0xFF0A84FF) : Colors.white70,
+                size: 22,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildPhotoTile(VaultFileMeta meta) {
-    final future =
-        _photoCache.putIfAbsent(meta.id, () => VaultService.instance.getDecryptedBytes(meta.id));
+    final future = _photoCache.putIfAbsent(
+        meta.id, () => VaultService.instance.getDecryptedBytes(meta.id));
 
     return FutureBuilder<Uint8List>(
       future: future,
@@ -343,19 +527,37 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
             ),
           );
         }
-        return GestureDetector(
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => PhotoViewerScreen(bytes: snapshot.data!),
-            ),
+
+        final image = ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image.memory(
+            snapshot.data!,
+            fit: BoxFit.cover,
+            cacheWidth: 300,
           ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: Image.memory(
-              snapshot.data!,
-              fit: BoxFit.cover,
-              cacheWidth: 300,
-            ),
+        );
+
+        return _buildSelectableOverlay(
+          meta.id,
+          GestureDetector(
+            onTap: _selectionMode
+                ? null
+                : () => Navigator.of(context)
+                    .push<bool>(
+                      MaterialPageRoute(
+                        builder: (_) => PhotoViewerScreen(
+                          id: meta.id,
+                          bytes: snapshot.data!,
+                        ),
+                      ),
+                    )
+                    .then((deleted) {
+                      if (deleted == true) {
+                        _photoCache.remove(meta.id);
+                        setState(() => _files.removeWhere((f) => f.id == meta.id));
+                      }
+                    }),
+            child: image,
           ),
         );
       },
@@ -372,44 +574,68 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
       future: future,
       builder: (context, snapshot) {
         final thumb = snapshot.data;
-        return GestureDetector(
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => VideoViewerScreen(id: meta.id, extension: meta.extension),
-            ),
+
+        final tile = ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              thumb != null
+                  ? Image.memory(thumb, fit: BoxFit.cover)
+                  : Container(color: const Color(0xFF1E1E1E)),
+              const Center(
+                child: Icon(Icons.play_circle_fill, color: Colors.white70, size: 36),
+              ),
+            ],
           ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                thumb != null
-                    ? Image.memory(thumb, fit: BoxFit.cover)
-                    : Container(color: const Color(0xFF1E1E1E)),
-                const Center(
-                  child: Icon(Icons.play_circle_fill,
-                      color: Colors.white70, size: 36),
-                ),
-              ],
-            ),
+        );
+
+        return _buildSelectableOverlay(
+          meta.id,
+          GestureDetector(
+            onTap: _selectionMode
+                ? null
+                : () => Navigator.of(context)
+                    .push<bool>(
+                      MaterialPageRoute(
+                        builder: (_) => VideoViewerScreen(
+                          id: meta.id,
+                          extension: meta.extension,
+                        ),
+                      ),
+                    )
+                    .then((deleted) {
+                      if (deleted == true) {
+                        _videoThumbCache.remove(meta.id);
+                        setState(() => _files.removeWhere((f) => f.id == meta.id));
+                      }
+                    }),
+            child: tile,
           ),
         );
       },
     );
   }
 
-  Widget _buildDocumentList(List<VaultFileMeta> files) {
+  Widget _buildDocumentList() {
     return ListView.builder(
       padding: const EdgeInsets.all(16),
-      itemCount: files.length,
+      itemCount: _files.length,
       itemBuilder: (context, index) {
-        final meta = files[index];
-        return Card(
+        final meta = _files[index];
+        final selected = _selectedIds.contains(meta.id);
+
+        final card = Card(
           color: const Color(0xFF1E1E1E),
           margin: const EdgeInsets.only(bottom: 10),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
           child: ListTile(
-            leading: Icon(_iconForCategory(widget.category.type), color: const Color(0xFF0A84FF)),
+            leading: _selectionMode
+                ? Icon(
+                    selected ? Icons.check_circle : Icons.radio_button_unchecked,
+                    color: selected ? const Color(0xFF0A84FF) : Colors.grey,
+                  )
+                : Icon(_iconForCategory(widget.category.type), color: const Color(0xFF0A84FF)),
             title: Text(
               meta.originalName,
               style: const TextStyle(color: Colors.white),
@@ -420,12 +646,32 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
               '${(meta.sizeInBytes / 1024).toStringAsFixed(1)} KB',
               style: const TextStyle(color: Colors.grey),
             ),
+            onLongPress: () => _enterSelectionMode(meta.id),
             onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Preview not available for this file type')),
-              );
+              if (_selectionMode) {
+                _toggleSelection(meta.id);
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Preview not available for this file type')),
+                );
+              }
             },
           ),
+        );
+
+        if (_selectionMode) return card;
+
+        return Dismissible(
+          key: ValueKey(meta.id),
+          direction: DismissDirection.horizontal,
+          background: _dismissBackground(Alignment.centerLeft),
+          secondaryBackground: _dismissBackground(Alignment.centerRight),
+          confirmDismiss: (_) => confirmDelete(context, 1),
+          onDismissed: (_) async {
+            await VaultService.instance.deleteFiles([meta.id]);
+            setState(() => _files.removeWhere((f) => f.id == meta.id));
+          },
+          child: card,
         );
       },
     );
@@ -433,9 +679,18 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
 }
 
 class PhotoViewerScreen extends StatelessWidget {
+  final String id;
   final Uint8List bytes;
 
-  const PhotoViewerScreen({super.key, required this.bytes});
+  const PhotoViewerScreen({super.key, required this.id, required this.bytes});
+
+  Future<void> _handleDelete(BuildContext context) async {
+    final confirmed = await confirmDelete(context, 1);
+    if (!confirmed) return;
+
+    await VaultService.instance.deleteFiles([id]);
+    if (context.mounted) Navigator.of(context).pop(true);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -444,6 +699,12 @@ class PhotoViewerScreen extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: Colors.black,
         iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+            onPressed: () => _handleDelete(context),
+          ),
+        ],
       ),
       body: Center(
         child: InteractiveViewer(
@@ -497,6 +758,14 @@ class _VideoViewerScreenState extends State<VideoViewerScreen> {
     controller.play();
   }
 
+  Future<void> _handleDelete() async {
+    final confirmed = await confirmDelete(context, 1);
+    if (!confirmed) return;
+
+    await VaultService.instance.deleteFiles([widget.id]);
+    if (mounted) Navigator.of(context).pop(true);
+  }
+
   @override
   void dispose() {
     _controller?.dispose();
@@ -513,6 +782,12 @@ class _VideoViewerScreenState extends State<VideoViewerScreen> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+            onPressed: _handleDelete,
+          ),
+        ],
       ),
       body: Center(
         child: _loading

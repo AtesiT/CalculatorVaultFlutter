@@ -230,4 +230,15 @@ class VaultService {
       await vaultFile.delete();
     }
   }
+
+  Future<void> deleteFiles(List<String> ids) async {
+    final vaultDir = await getVaultDirectory();
+        for (final id in ids) {
+            final file = File(p.join(vaultDir.path, id));
+            if (await file.exists()) {
+            await file.delete();
+            }
+            await _box.delete(id);
+        }
+    }
 }
