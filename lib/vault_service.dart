@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:encrypt/encrypt.dart' as enc;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -13,20 +14,33 @@ import 'package:video_thumbnail/video_thumbnail.dart';
 
 import 'models.dart';
 
+enum VaultMode { real, decoy }
+
+enum CodeCheckResult { none, real, duress }
+
 class VaultService {
   VaultService._internal();
   static final VaultService instance = VaultService._internal();
 
   static const String _vaultFolderName = '.vault_secure';
+  static const String _decoyFolderName = '.vault_secure_decoy';
   static const String _secureKeyStorageKey = 'vault_encryption_key_v1';
   static const String _metaBoxName = 'vault_files_meta';
+  static const String _decoyMetaBoxName = 'vault_decoy_meta';
+
+  static const String _realCodeHashKey = 'vault_real_code_hash_v1';
+  static const String _duressCodeHashKey = 'vault_duress_code_hash_v1';
+  static const String _hashSalt = 'CalculatorVaultSalt_v1';
+  static const String _defaultRealCode = '0101';
 
   final _secureStorage = const FlutterSecureStorage();
   final _uuid = const Uuid();
 
   Directory? _cachedVaultDir;
+  Directory? _cachedDecoyDir;
   enc.Key? _cachedKey;
   Box<VaultFileMeta>? _metaBox;
+  Box<VaultFileMeta>? _decoyMetaBox;
 
   bool isVaultOpen = false;
 
@@ -35,33 +49,108 @@ class VaultService {
       Hive.registerAdapter(VaultFileMetaAdapter());
     }
     _metaBox = await Hive.openBox<VaultFileMeta>(_metaBoxName);
-    await getVaultDirectory();
+    _decoyMetaBox = await Hive.openBox<VaultFileMeta>(_decoyMetaBoxName);
+
+    await getVaultDirectory(VaultMode.real);
+    await getVaultDirectory(VaultMode.decoy);
+
+    final existingRealHash = await _secureStorage.read(key: _realCodeHashKey);
+    if (existingRealHash == null) {
+      await _secureStorage.write(
+        key: _realCodeHashKey,
+        value: _hashCode(_defaultRealCode),
+      );
+    }
   }
 
-  Box<VaultFileMeta> get _box {
-    if (_metaBox == null) {
+  Box<VaultFileMeta> _box(VaultMode mode) {
+    final box = mode == VaultMode.real ? _metaBox : _decoyMetaBox;
+    if (box == null) {
       throw StateError('VaultService is not initialized. Call init().');
     }
-    return _metaBox!;
+    return box;
   }
 
-  Future<Directory> getVaultDirectory() async {
-    if (_cachedVaultDir != null) return _cachedVaultDir!;
+  Future<Directory> getVaultDirectory(VaultMode mode) async {
+    if (mode == VaultMode.real && _cachedVaultDir != null) return _cachedVaultDir!;
+    if (mode == VaultMode.decoy && _cachedDecoyDir != null) return _cachedDecoyDir!;
 
     final appDocDir = await getApplicationDocumentsDirectory();
-    final vaultDir = Directory(p.join(appDocDir.path, _vaultFolderName));
+    final folderName = mode == VaultMode.real ? _vaultFolderName : _decoyFolderName;
+    final dir = Directory(p.join(appDocDir.path, folderName));
 
-    if (!await vaultDir.exists()) {
-      await vaultDir.create(recursive: true);
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
     }
 
-    final noMediaFile = File(p.join(vaultDir.path, '.nomedia'));
+    final noMediaFile = File(p.join(dir.path, '.nomedia'));
     if (!await noMediaFile.exists()) {
       await noMediaFile.create();
     }
 
-    _cachedVaultDir = vaultDir;
-    return vaultDir;
+    if (mode == VaultMode.real) {
+      _cachedVaultDir = dir;
+    } else {
+      _cachedDecoyDir = dir;
+    }
+    return dir;
+  }
+
+  String _hashCode(String rawCode) {
+    final bytes = utf8.encode('$_hashSalt::$rawCode');
+    return sha256.convert(bytes).toString();
+  }
+
+  Future<CodeCheckResult> checkCode(String rawDigits) async {
+    if (rawDigits.isEmpty) return CodeCheckResult.none;
+
+    final candidateHash = _hashCode(rawDigits);
+
+    final realHash = await _secureStorage.read(key: _realCodeHashKey);
+    if (realHash != null && candidateHash == realHash) {
+      return CodeCheckResult.real;
+    }
+
+    final duressHash = await _secureStorage.read(key: _duressCodeHashKey);
+    if (duressHash != null && candidateHash == duressHash) {
+      return CodeCheckResult.duress;
+    }
+
+    return CodeCheckResult.none;
+  }
+
+  Future<bool> setRealCode(String newCode) async {
+    final newHash = _hashCode(newCode);
+    final duressHash = await _secureStorage.read(key: _duressCodeHashKey);
+    if (duressHash != null && newHash == duressHash) {
+      return false;
+    }
+    await _secureStorage.write(key: _realCodeHashKey, value: newHash);
+    return true;
+  }
+
+  Future<bool> setDuressCode(String newCode) async {
+    final newHash = _hashCode(newCode);
+    final realHash = await _secureStorage.read(key: _realCodeHashKey);
+    if (realHash != null && newHash == realHash) {
+      return false;
+    }
+    await _secureStorage.write(key: _duressCodeHashKey, value: newHash);
+    return true;
+  }
+
+  Future<void> clearDuressCode() async {
+    await _secureStorage.delete(key: _duressCodeHashKey);
+  }
+
+  Future<bool> isDuressCodeSet() async {
+    final hash = await _secureStorage.read(key: _duressCodeHashKey);
+    return hash != null;
+  }
+
+  Future<void> wipeDecoyVault() async {
+    final ids = _box(VaultMode.decoy).values.map((f) => f.id).toList();
+    await deleteFiles(VaultMode.decoy, ids);
   }
 
   Future<enc.Key> _getEncryptionKey() async {
@@ -102,8 +191,8 @@ class VaultService {
     return Uint8List.fromList(decrypted);
   }
 
-  Future<File> _secureWriteFile(File sourceFile) async {
-    final vaultDir = await getVaultDirectory();
+  Future<File> _secureWriteFile(VaultMode mode, File sourceFile) async {
+    final vaultDir = await getVaultDirectory(mode);
     final plainBytes = await sourceFile.readAsBytes();
     final encryptedBytes = await _encryptBytes(plainBytes);
 
@@ -131,13 +220,16 @@ class VaultService {
     }
   }
 
-  Future<VaultFileMeta> _importSingleFile(PlatformFile platformFile) async {
+  Future<VaultFileMeta> _importSingleFile(
+    VaultMode mode,
+    PlatformFile platformFile,
+  ) async {
     if (platformFile.path == null) {
       throw Exception('File path unavailable: ${platformFile.name}');
     }
 
     final sourceFile = File(platformFile.path!);
-    final storedFile = await _secureWriteFile(sourceFile);
+    final storedFile = await _secureWriteFile(mode, sourceFile);
 
     final ext = p.extension(platformFile.name).replaceAll('.', '');
     final category = detectCategoryForExtension(ext);
@@ -153,11 +245,12 @@ class VaultService {
       dateAddedMillis: DateTime.now().millisecondsSinceEpoch,
     );
 
-    await _box.put(meta.id, meta);
+    await _box(mode).put(meta.id, meta);
     return meta;
   }
 
   Future<List<VaultFileMeta>> importFiles(
+    VaultMode mode,
     List<PlatformFile> files, {
     required void Function(int completed, int total, String currentFileName)
         onProgress,
@@ -167,7 +260,7 @@ class VaultService {
     for (int i = 0; i < files.length; i++) {
       onProgress(i, files.length, files[i].name);
       try {
-        final meta = await _importSingleFile(files[i]);
+        final meta = await _importSingleFile(mode, files[i]);
         results.add(meta);
       } catch (_) {
         continue;
@@ -178,27 +271,34 @@ class VaultService {
     return results;
   }
 
-  List<VaultFileMeta> getAllFiles() => _box.values.toList();
+  List<VaultFileMeta> getAllFiles(VaultMode mode) => _box(mode).values.toList();
 
-  List<VaultFileMeta> getFilesByCategory(VaultCategoryType category) =>
-      _box.values.where((f) => f.category == category).toList();
+  List<VaultFileMeta> getFilesByCategory(
+    VaultMode mode,
+    VaultCategoryType category,
+  ) =>
+      _box(mode).values.where((f) => f.category == category).toList();
 
-  Map<VaultCategoryType, int> getCategoryCounts() {
+  Map<VaultCategoryType, int> getCategoryCounts(VaultMode mode) {
     final counts = {for (final c in VaultCategoryType.values) c: 0};
-    for (final meta in _box.values) {
+    for (final meta in _box(mode).values) {
       counts[meta.category] = (counts[meta.category] ?? 0) + 1;
     }
     return counts;
   }
 
-  Future<Uint8List> getDecryptedBytes(String id) async {
-    final vaultDir = await getVaultDirectory();
+  Future<Uint8List> getDecryptedBytes(VaultMode mode, String id) async {
+    final vaultDir = await getVaultDirectory(mode);
     final vaultFile = File(p.join(vaultDir.path, id));
     return readDecryptedBytes(vaultFile);
   }
 
-  Future<File> prepareTempPlaybackFile(String id, String extension) async {
-    final vaultDir = await getVaultDirectory();
+  Future<File> prepareTempPlaybackFile(
+    VaultMode mode,
+    String id,
+    String extension,
+  ) async {
+    final vaultDir = await getVaultDirectory(mode);
     final vaultFile = File(p.join(vaultDir.path, id));
     final decrypted = await readDecryptedBytes(vaultFile);
 
@@ -216,10 +316,14 @@ class VaultService {
     }
   }
 
-  Future<Uint8List?> getVideoThumbnail(String id, String extension) async {
+  Future<Uint8List?> getVideoThumbnail(
+    VaultMode mode,
+    String id,
+    String extension,
+  ) async {
     File? tempFile;
     try {
-      tempFile = await prepareTempPlaybackFile(id, extension);
+      tempFile = await prepareTempPlaybackFile(mode, id, extension);
       final bytes = await VideoThumbnail.thumbnailData(
         video: tempFile.path,
         imageFormat: ImageFormat.JPEG,
@@ -236,14 +340,14 @@ class VaultService {
     }
   }
 
-  Future<void> deleteFiles(List<String> ids) async {
-    final vaultDir = await getVaultDirectory();
+  Future<void> deleteFiles(VaultMode mode, List<String> ids) async {
+    final vaultDir = await getVaultDirectory(mode);
     for (final id in ids) {
       final file = File(p.join(vaultDir.path, id));
       if (await file.exists()) {
         await file.delete();
       }
-      await _box.delete(id);
+      await _box(mode).delete(id);
     }
   }
 }

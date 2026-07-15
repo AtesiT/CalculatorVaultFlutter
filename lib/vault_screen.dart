@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
 import 'models.dart';
@@ -60,7 +61,9 @@ class ImportProgress {
 }
 
 class VaultScreen extends StatefulWidget {
-  const VaultScreen({super.key});
+  final VaultMode mode;
+
+  const VaultScreen({super.key, required this.mode});
 
   @override
   State<VaultScreen> createState() => _VaultScreenState();
@@ -82,7 +85,7 @@ class _VaultScreenState extends State<VaultScreen> {
 
   void _refreshCounts() {
     setState(() {
-      _fileCounts = VaultService.instance.getCategoryCounts();
+      _fileCounts = VaultService.instance.getCategoryCounts(widget.mode);
     });
   }
 
@@ -104,6 +107,7 @@ class _VaultScreenState extends State<VaultScreen> {
     );
 
     final imported = await VaultService.instance.importFiles(
+      widget.mode,
       files,
       onProgress: (completed, total, name) {
         _importProgress.value = ImportProgress(completed, total, name);
@@ -211,7 +215,7 @@ class _VaultScreenState extends State<VaultScreen> {
     Navigator.of(context)
         .push(
           MaterialPageRoute(
-            builder: (_) => CategoryFilesScreen(category: category),
+            builder: (_) => CategoryFilesScreen(category: category, mode: widget.mode),
           ),
         )
         .then((_) => _refreshCounts());
@@ -219,6 +223,12 @@ class _VaultScreenState extends State<VaultScreen> {
 
   void _lockVault() {
     Navigator.of(context).pop();
+  }
+
+  void _openSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const VaultSettingsScreen()),
+    );
   }
 
   @override
@@ -234,6 +244,15 @@ class _VaultScreenState extends State<VaultScreen> {
           tooltip: 'Lock',
           onPressed: _lockVault,
         ),
+        actions: widget.mode == VaultMode.real
+            ? [
+                IconButton(
+                  icon: const Icon(Icons.settings_outlined, color: Colors.white),
+                  tooltip: 'Security Settings',
+                  onPressed: _openSettings,
+                ),
+              ]
+            : null,
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
@@ -297,8 +316,9 @@ class _VaultScreenState extends State<VaultScreen> {
 
 class CategoryFilesScreen extends StatefulWidget {
   final VaultCategory category;
+  final VaultMode mode;
 
-  const CategoryFilesScreen({super.key, required this.category});
+  const CategoryFilesScreen({super.key, required this.category, required this.mode});
 
   @override
   State<CategoryFilesScreen> createState() => _CategoryFilesScreenState();
@@ -319,7 +339,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
   @override
   void initState() {
     super.initState();
-    _files = VaultService.instance.getFilesByCategory(widget.category.type);
+    _files = VaultService.instance.getFilesByCategory(widget.mode, widget.category.type);
   }
 
   void _enterSelectionMode(String id) {
@@ -352,7 +372,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
     if (!confirmed) return;
 
     final ids = _selectedIds.toList();
-    await VaultService.instance.deleteFiles(ids);
+    await VaultService.instance.deleteFiles(widget.mode, ids);
 
     for (final id in ids) {
       _photoCache.remove(id);
@@ -459,7 +479,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
           secondaryBackground: _dismissBackground(Alignment.centerRight),
           confirmDismiss: (_) => confirmDelete(context, 1),
           onDismissed: (_) async {
-            await VaultService.instance.deleteFiles([meta.id]);
+            await VaultService.instance.deleteFiles(widget.mode, [meta.id]);
             _photoCache.remove(meta.id);
             _videoThumbCache.remove(meta.id);
             setState(() => _files.removeWhere((f) => f.id == meta.id));
@@ -512,7 +532,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
 
   Widget _buildPhotoTile(VaultFileMeta meta) {
     final future = _photoCache.putIfAbsent(
-        meta.id, () => VaultService.instance.getDecryptedBytes(meta.id));
+        meta.id, () => VaultService.instance.getDecryptedBytes(widget.mode, meta.id));
 
     return FutureBuilder<Uint8List>(
       future: future,
@@ -550,6 +570,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
                         builder: (_) => PhotoViewerScreen(
                           id: meta.id,
                           bytes: snapshot.data!,
+                          mode: widget.mode,
                         ),
                       ),
                     )
@@ -569,7 +590,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
   Widget _buildVideoTile(VaultFileMeta meta) {
     final future = _videoThumbCache.putIfAbsent(
       meta.id,
-      () => VaultService.instance.getVideoThumbnail(meta.id, meta.extension),
+      () => VaultService.instance.getVideoThumbnail(widget.mode, meta.id, meta.extension),
     );
 
     return FutureBuilder<Uint8List?>(
@@ -609,6 +630,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
                         builder: (_) => VideoViewerScreen(
                           id: meta.id,
                           extension: meta.extension,
+                          mode: widget.mode,
                         ),
                       ),
                     )
@@ -676,7 +698,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
           secondaryBackground: _dismissBackground(Alignment.centerRight),
           confirmDismiss: (_) => confirmDelete(context, 1),
           onDismissed: (_) async {
-            await VaultService.instance.deleteFiles([meta.id]);
+            await VaultService.instance.deleteFiles(widget.mode, [meta.id]);
             setState(() => _files.removeWhere((f) => f.id == meta.id));
           },
           child: card,
@@ -689,14 +711,20 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
 class PhotoViewerScreen extends StatelessWidget {
   final String id;
   final Uint8List bytes;
+  final VaultMode mode;
 
-  const PhotoViewerScreen({super.key, required this.id, required this.bytes});
+  const PhotoViewerScreen({
+    super.key,
+    required this.id,
+    required this.bytes,
+    required this.mode,
+  });
 
   Future<void> _handleDelete(BuildContext context) async {
     final confirmed = await confirmDelete(context, 1);
     if (!confirmed) return;
 
-    await VaultService.instance.deleteFiles([id]);
+    await VaultService.instance.deleteFiles(mode, [id]);
     if (context.mounted) Navigator.of(context).pop(true);
   }
 
@@ -733,8 +761,14 @@ class PhotoViewerScreen extends StatelessWidget {
 class VideoViewerScreen extends StatefulWidget {
   final String id;
   final String extension;
+  final VaultMode mode;
 
-  const VideoViewerScreen({super.key, required this.id, required this.extension});
+  const VideoViewerScreen({
+    super.key,
+    required this.id,
+    required this.extension,
+    required this.mode,
+  });
 
   @override
   State<VideoViewerScreen> createState() => _VideoViewerScreenState();
@@ -755,6 +789,7 @@ class _VideoViewerScreenState extends State<VideoViewerScreen> {
   Future<void> _load() async {
     try {
       final file = await VaultService.instance.prepareTempPlaybackFile(
+        widget.mode,
         widget.id,
         widget.extension,
       );
@@ -787,7 +822,7 @@ class _VideoViewerScreenState extends State<VideoViewerScreen> {
     final confirmed = await confirmDelete(context, 1);
     if (!confirmed) return;
 
-    await VaultService.instance.deleteFiles([widget.id]);
+    await VaultService.instance.deleteFiles(widget.mode, [widget.id]);
     if (mounted) Navigator.of(context).pop(true);
   }
 
@@ -842,6 +877,316 @@ class _VideoViewerScreenState extends State<VideoViewerScreen> {
                       child: VideoPlayer(_controller!),
                     ),
                   ),
+      ),
+    );
+  }
+}
+
+class VaultSettingsScreen extends StatefulWidget {
+  const VaultSettingsScreen({super.key});
+
+  @override
+  State<VaultSettingsScreen> createState() => _VaultSettingsScreenState();
+}
+
+class _VaultSettingsScreenState extends State<VaultSettingsScreen> {
+  final _newCodeController = TextEditingController();
+  final _confirmCodeController = TextEditingController();
+  final _newDuressController = TextEditingController();
+  final _confirmDuressController = TextEditingController();
+
+  bool _duressEnabled = false;
+  bool _loadingDuressState = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDuressState();
+  }
+
+  Future<void> _loadDuressState() async {
+    final isSet = await VaultService.instance.isDuressCodeSet();
+    if (!mounted) return;
+    setState(() {
+      _duressEnabled = isSet;
+      _loadingDuressState = false;
+    });
+  }
+
+  @override
+  void dispose() {
+    _newCodeController.dispose();
+    _confirmCodeController.dispose();
+    _newDuressController.dispose();
+    _confirmDuressController.dispose();
+    super.dispose();
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _saveRealCode() async {
+    final newCode = _newCodeController.text;
+    final confirmCode = _confirmCodeController.text;
+
+    if (newCode.length < 4) {
+      _showMessage('Code must be at least 4 digits long');
+      return;
+    }
+    if (newCode != confirmCode) {
+      _showMessage('Codes do not match');
+      return;
+    }
+
+    final success = await VaultService.instance.setRealCode(newCode);
+    if (!success) {
+      _showMessage('This code is already used as the duress code');
+      return;
+    }
+
+    _newCodeController.clear();
+    _confirmCodeController.clear();
+    _showMessage('Access code updated');
+  }
+
+  Future<void> _saveDuressCode() async {
+    final newCode = _newDuressController.text;
+    final confirmCode = _confirmDuressController.text;
+
+    if (newCode.length < 4) {
+      _showMessage('Code must be at least 4 digits long');
+      return;
+    }
+    if (newCode != confirmCode) {
+      _showMessage('Codes do not match');
+      return;
+    }
+
+    final success = await VaultService.instance.setDuressCode(newCode);
+    if (!success) {
+      _showMessage('This code is already used as your access code');
+      return;
+    }
+
+    _newDuressController.clear();
+    _confirmDuressController.clear();
+    setState(() => _duressEnabled = true);
+    _showMessage('Duress code enabled');
+  }
+
+  Future<void> _disableDuress() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Disable Duress Code', style: TextStyle(color: Colors.white)),
+        content: Text(
+          'This will remove the duress code protection.',
+          style: TextStyle(color: Colors.grey[300]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Disable', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    await VaultService.instance.clearDuressCode();
+    setState(() => _duressEnabled = false);
+    _showMessage('Duress code disabled');
+  }
+
+  Future<void> _wipeDecoyVault() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Erase Decoy Vault', style: TextStyle(color: Colors.white)),
+        content: Text(
+          'This will permanently delete all files stored in the decoy vault. Continue?',
+          style: TextStyle(color: Colors.grey[300]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Erase', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await VaultService.instance.wipeDecoyVault();
+    if (mounted) _showMessage('Decoy vault content erased');
+  }
+
+  InputDecoration _fieldDecoration(String label) {
+    return InputDecoration(
+      labelText: label,
+      labelStyle: const TextStyle(color: Colors.grey),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFF3A3A3C)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFF0A84FF)),
+      ),
+    );
+  }
+
+  Widget _buildSectionTitle(String title) {
+    return Text(
+      title,
+      style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF121212),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF121212),
+        elevation: 0,
+        title: const Text('Vault Security', style: TextStyle(color: Colors.white)),
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          _buildSectionTitle('Access Code'),
+          const SizedBox(height: 8),
+          Text(
+            'This code opens your real vault from the calculator.',
+            style: TextStyle(color: Colors.grey[500], fontSize: 13),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _newCodeController,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            obscureText: true,
+            style: const TextStyle(color: Colors.white),
+            decoration: _fieldDecoration('New code'),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _confirmCodeController,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            obscureText: true,
+            style: const TextStyle(color: Colors.white),
+            decoration: _fieldDecoration('Confirm new code'),
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0A84FF),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              onPressed: _saveRealCode,
+              child: const Text('Save Access Code', style: TextStyle(color: Colors.white)),
+            ),
+          ),
+          const SizedBox(height: 36),
+          const Divider(color: Color(0xFF2C2C2E)),
+          const SizedBox(height: 20),
+          _buildSectionTitle('Duress Code'),
+          const SizedBox(height: 8),
+          Text(
+            'If entered instead of your access code, this opens a separate, '
+            'empty decoy vault. Your real files stay hidden and untouched.',
+            style: TextStyle(color: Colors.grey[500], fontSize: 13),
+          ),
+          const SizedBox(height: 16),
+          if (_loadingDuressState)
+            const Center(child: CircularProgressIndicator(color: Color(0xFF0A84FF)))
+          else ...[
+            if (_duressEnabled)
+              Container(
+                padding: const EdgeInsets.all(14),
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E1E1E),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.check_circle, color: Colors.greenAccent, size: 20),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text('Duress code is active', style: TextStyle(color: Colors.white)),
+                    ),
+                    TextButton(
+                      onPressed: _disableDuress,
+                      child: const Text('Disable', style: TextStyle(color: Colors.redAccent)),
+                    ),
+                  ],
+                ),
+              ),
+            TextField(
+              controller: _newDuressController,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              obscureText: true,
+              style: const TextStyle(color: Colors.white),
+              decoration: _fieldDecoration(_duressEnabled ? 'New duress code' : 'Set duress code'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _confirmDuressController,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              obscureText: true,
+              style: const TextStyle(color: Colors.white),
+              decoration: _fieldDecoration('Confirm duress code'),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Color(0xFF0A84FF)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: _saveDuressCode,
+                child: Text(
+                  _duressEnabled ? 'Update Duress Code' : 'Enable Duress Code',
+                  style: const TextStyle(color: Color(0xFF0A84FF)),
+                ),
+              ),
+            ),
+            if (_duressEnabled) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: TextButton(
+                  onPressed: _wipeDecoyVault,
+                  child: const Text('Erase Decoy Vault Content', style: TextStyle(color: Colors.grey)),
+                ),
+              ),
+            ],
+          ],
+        ],
       ),
     );
   }

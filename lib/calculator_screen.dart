@@ -19,7 +19,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
   bool _hasError = false;
 
   String _rawDigits = '';
-  static const String _secretCode = '0101';
   static const int _maxSignificantDigits = 10;
 
   String _formatNumber(double value) {
@@ -52,10 +51,8 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     if (_hasError) return;
 
     if (value == '=') {
-      if (_operator == null &&
-          _firstOperand == null &&
-          _rawDigits == _secretCode) {
-        _navigateToVault();
+      if (_operator == null && _firstOperand == null && _rawDigits.isNotEmpty) {
+        _handleSecretCodeCheck();
         return;
       }
       setState(_handleEquals);
@@ -79,10 +76,25 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     });
   }
 
-  Future<void> _navigateToVault() async {
+  Future<void> _handleSecretCodeCheck() async {
+    final capturedDigits = _rawDigits;
+    final result = await VaultService.instance.checkCode(capturedDigits);
+
+    if (!mounted) return;
+
+    if (result == CodeCheckResult.real) {
+      _navigateToVault(VaultMode.real);
+    } else if (result == CodeCheckResult.duress) {
+      _navigateToVault(VaultMode.decoy);
+    } else {
+      setState(_handleEquals);
+    }
+  }
+
+  Future<void> _navigateToVault(VaultMode mode) async {
     VaultService.instance.isVaultOpen = true;
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const VaultScreen()),
+      MaterialPageRoute(builder: (_) => VaultScreen(mode: mode)),
     );
     VaultService.instance.isVaultOpen = false;
     setState(_resetAll);
