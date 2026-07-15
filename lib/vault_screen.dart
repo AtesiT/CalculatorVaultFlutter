@@ -347,19 +347,6 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
     });
   }
 
-  Future<void> _deleteSingle(String id) async {
-    final confirmed = await confirmDelete(context, 1);
-    if (!confirmed) return;
-
-    await VaultService.instance.deleteFiles([id]);
-    _photoCache.remove(id);
-    _videoThumbCache.remove(id);
-
-    setState(() {
-      _files.removeWhere((f) => f.id == id);
-    });
-  }
-
   Future<void> _deleteSelected() async {
     final confirmed = await confirmDelete(context, _selectedIds.length);
     if (!confirmed) return;
@@ -377,6 +364,17 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
       _selectionMode = false;
       _selectedIds.clear();
     });
+  }
+
+  Widget _buildBrokenTile() {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E1E),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      alignment: Alignment.center,
+      child: Icon(Icons.broken_image_outlined, color: Colors.grey[600]),
+    );
   }
 
   @override
@@ -519,6 +517,9 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
     return FutureBuilder<Uint8List>(
       future: future,
       builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return _buildBrokenTile();
+        }
         if (!snapshot.hasData) {
           return Container(
             decoration: BoxDecoration(
@@ -534,6 +535,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
             snapshot.data!,
             fit: BoxFit.cover,
             cacheWidth: 300,
+            errorBuilder: (context, error, stack) => _buildBrokenTile(),
           ),
         );
 
@@ -581,7 +583,13 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
             fit: StackFit.expand,
             children: [
               thumb != null
-                  ? Image.memory(thumb, fit: BoxFit.cover)
+                  ? Image.memory(
+                      thumb,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stack) => Container(
+                        color: const Color(0xFF1E1E1E),
+                      ),
+                    )
                   : Container(color: const Color(0xFF1E1E1E)),
               const Center(
                 child: Icon(Icons.play_circle_fill, color: Colors.white70, size: 36),
@@ -708,7 +716,14 @@ class PhotoViewerScreen extends StatelessWidget {
       ),
       body: Center(
         child: InteractiveViewer(
-          child: Image.memory(bytes),
+          child: Image.memory(
+            bytes,
+            errorBuilder: (context, error, stack) => Icon(
+              Icons.broken_image_outlined,
+              color: Colors.grey[600],
+              size: 64,
+            ),
+          ),
         ),
       ),
     );
@@ -729,6 +744,7 @@ class _VideoViewerScreenState extends State<VideoViewerScreen> {
   VideoPlayerController? _controller;
   File? _tempFile;
   bool _loading = true;
+  bool _hasError = false;
 
   @override
   void initState() {
@@ -737,25 +753,34 @@ class _VideoViewerScreenState extends State<VideoViewerScreen> {
   }
 
   Future<void> _load() async {
-    final file = await VaultService.instance.prepareTempPlaybackFile(
-      widget.id,
-      widget.extension,
-    );
-    final controller = VideoPlayerController.file(file);
-    await controller.initialize();
+    try {
+      final file = await VaultService.instance.prepareTempPlaybackFile(
+        widget.id,
+        widget.extension,
+      );
+      final controller = VideoPlayerController.file(file);
+      await controller.initialize();
 
-    if (!mounted) {
-      await controller.dispose();
-      await VaultService.instance.deleteTempFile(file);
-      return;
+      if (!mounted) {
+        await controller.dispose();
+        await VaultService.instance.deleteTempFile(file);
+        return;
+      }
+
+      setState(() {
+        _tempFile = file;
+        _controller = controller;
+        _loading = false;
+      });
+      controller.play();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _hasError = true;
+        });
+      }
     }
-
-    setState(() {
-      _tempFile = file;
-      _controller = controller;
-      _loading = false;
-    });
-    controller.play();
   }
 
   Future<void> _handleDelete() async {
@@ -792,19 +817,31 @@ class _VideoViewerScreenState extends State<VideoViewerScreen> {
       body: Center(
         child: _loading
             ? const CircularProgressIndicator(color: Color(0xFF0A84FF))
-            : AspectRatio(
-                aspectRatio: _controller!.value.aspectRatio,
-                child: GestureDetector(
-                  onTap: () {
-                    setState(() {
-                      _controller!.value.isPlaying
-                          ? _controller!.pause()
-                          : _controller!.play();
-                    });
-                  },
-                  child: VideoPlayer(_controller!),
-                ),
-              ),
+            : _hasError
+                ? Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.error_outline, color: Colors.grey[600], size: 48),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Unable to play this video',
+                        style: TextStyle(color: Colors.grey[400]),
+                      ),
+                    ],
+                  )
+                : AspectRatio(
+                    aspectRatio: _controller!.value.aspectRatio,
+                    child: GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          _controller!.value.isPlaying
+                              ? _controller!.pause()
+                              : _controller!.play();
+                        });
+                      },
+                      child: VideoPlayer(_controller!),
+                    ),
+                  ),
       ),
     );
   }

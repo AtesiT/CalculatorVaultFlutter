@@ -28,6 +28,8 @@ class VaultService {
   enc.Key? _cachedKey;
   Box<VaultFileMeta>? _metaBox;
 
+  bool isVaultOpen = false;
+
   Future<void> init() async {
     if (!Hive.isAdapterRegistered(0)) {
       Hive.registerAdapter(VaultFileMetaAdapter());
@@ -118,11 +120,15 @@ class VaultService {
   }
 
   Future<List<PlatformFile>> pickFiles() async {
-    final result = await FilePicker.platform.pickFiles(
-      allowMultiple: true,
-      type: FileType.any,
-    );
-    return result?.files ?? [];
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        type: FileType.any,
+      );
+      return result?.files ?? [];
+    } catch (_) {
+      return [];
+    }
   }
 
   Future<VaultFileMeta> _importSingleFile(PlatformFile platformFile) async {
@@ -211,8 +217,9 @@ class VaultService {
   }
 
   Future<Uint8List?> getVideoThumbnail(String id, String extension) async {
-    final tempFile = await prepareTempPlaybackFile(id, extension);
+    File? tempFile;
     try {
+      tempFile = await prepareTempPlaybackFile(id, extension);
       final bytes = await VideoThumbnail.thumbnailData(
         video: tempFile.path,
         imageFormat: ImageFormat.JPEG,
@@ -220,25 +227,23 @@ class VaultService {
         quality: 60,
       );
       return bytes;
+    } catch (_) {
+      return null;
     } finally {
-      await deleteTempFile(tempFile);
-    }
-  }
-
-  Future<void> deletePhysicalFile(File vaultFile) async {
-    if (await vaultFile.exists()) {
-      await vaultFile.delete();
+      if (tempFile != null) {
+        await deleteTempFile(tempFile);
+      }
     }
   }
 
   Future<void> deleteFiles(List<String> ids) async {
     final vaultDir = await getVaultDirectory();
-        for (final id in ids) {
-            final file = File(p.join(vaultDir.path, id));
-            if (await file.exists()) {
-            await file.delete();
-            }
-            await _box.delete(id);
-        }
+    for (final id in ids) {
+      final file = File(p.join(vaultDir.path, id));
+      if (await file.exists()) {
+        await file.delete();
+      }
+      await _box.delete(id);
     }
+  }
 }

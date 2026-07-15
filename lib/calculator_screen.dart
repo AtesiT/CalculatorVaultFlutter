@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'vault_screen.dart';
+import 'vault_service.dart';
 
 class CalculatorScreen extends StatefulWidget {
   const CalculatorScreen({super.key});
@@ -19,7 +20,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
 
   String _rawDigits = '';
   static const String _secretCode = '0101';
-
   static const int _maxSignificantDigits = 10;
 
   String _formatNumber(double value) {
@@ -80,9 +80,11 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
   }
 
   Future<void> _navigateToVault() async {
+    VaultService.instance.isVaultOpen = true;
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const VaultScreen()),
     );
+    VaultService.instance.isVaultOpen = false;
     setState(_resetAll);
   }
 
@@ -114,7 +116,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     } else if (!_display.contains('.')) {
       _display += '.';
     }
-    _rawDigits = ''; 
+    _rawDigits = '';
   }
 
   void _handleBackspace() {
