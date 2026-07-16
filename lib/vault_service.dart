@@ -1,9 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
-import 'package:encrypt/encrypt.dart' as enc;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
+import 'crypto_isolate.dart';
 import 'models.dart';
 
 enum VaultMode { real, decoy }
@@ -38,7 +39,7 @@ class VaultService {
 
   Directory? _cachedVaultDir;
   Directory? _cachedDecoyDir;
-  enc.Key? _cachedKey;
+  Uint8List? _cachedKeyBytes;
   Box<VaultFileMeta>? _metaBox;
   Box<VaultFileMeta>? _decoyMetaBox;
 
@@ -153,59 +154,28 @@ class VaultService {
     await deleteFiles(VaultMode.decoy, ids);
   }
 
-  Future<enc.Key> _getEncryptionKey() async {
-    if (_cachedKey != null) return _cachedKey!;
+  Uint8List _generateRandomKeyBytes(int length) {
+    final rnd = Random.secure();
+    final bytes = Uint8List(length);
+    for (var i = 0; i < length; i++) {
+      bytes[i] = rnd.nextInt(256);
+    }
+    return bytes;
+  }
+
+  Future<Uint8List> _getEncryptionKeyBytes() async {
+    if (_cachedKeyBytes != null) return _cachedKeyBytes!;
 
     String? storedKey = await _secureStorage.read(key: _secureKeyStorageKey);
 
     if (storedKey == null) {
-      final newKey = enc.Key.fromSecureRandom(32);
-      storedKey = base64Encode(newKey.bytes);
+      final newKeyBytes = _generateRandomKeyBytes(32);
+      storedKey = base64Encode(newKeyBytes);
       await _secureStorage.write(key: _secureKeyStorageKey, value: storedKey);
     }
 
-    _cachedKey = enc.Key(base64Decode(storedKey));
-    return _cachedKey!;
-  }
-
-  Future<Uint8List> _encryptBytes(Uint8List plainBytes) async {
-    final key = await _getEncryptionKey();
-    final iv = enc.IV.fromSecureRandom(16);
-    final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
-    final encrypted = encrypter.encryptBytes(plainBytes, iv: iv);
-
-    final result = BytesBuilder();
-    result.add(iv.bytes);
-    result.add(encrypted.bytes);
-    return result.toBytes();
-  }
-
-  Future<Uint8List> _decryptBytes(Uint8List fileBytes) async {
-    final key = await _getEncryptionKey();
-    final iv = enc.IV(fileBytes.sublist(0, 16));
-    final cipherBytes = fileBytes.sublist(16);
-
-    final encrypter = enc.Encrypter(enc.AES(key, mode: enc.AESMode.cbc));
-    final decrypted =
-        encrypter.decryptBytes(enc.Encrypted(cipherBytes), iv: iv);
-    return Uint8List.fromList(decrypted);
-  }
-
-  Future<File> _secureWriteFile(VaultMode mode, File sourceFile) async {
-    final vaultDir = await getVaultDirectory(mode);
-    final plainBytes = await sourceFile.readAsBytes();
-    final encryptedBytes = await _encryptBytes(plainBytes);
-
-    final newFileName = _uuid.v4();
-    final newFile = File(p.join(vaultDir.path, newFileName));
-
-    await newFile.writeAsBytes(encryptedBytes, flush: true);
-    return newFile;
-  }
-
-  Future<Uint8List> readDecryptedBytes(File vaultFile) async {
-    final encryptedBytes = await vaultFile.readAsBytes();
-    return _decryptBytes(encryptedBytes);
+    _cachedKeyBytes = base64Decode(storedKey);
+    return _cachedKeyBytes!;
   }
 
   Future<List<PlatformFile>> pickFiles() async {
@@ -222,23 +192,32 @@ class VaultService {
 
   Future<VaultFileMeta> _importSingleFile(
     VaultMode mode,
-    PlatformFile platformFile,
-  ) async {
+    PlatformFile platformFile, {
+    required void Function(int bytesDone) onFileProgress,
+  }) async {
     if (platformFile.path == null) {
       throw Exception('File path unavailable: ${platformFile.name}');
     }
 
-    final sourceFile = File(platformFile.path!);
-    final storedFile = await _secureWriteFile(mode, sourceFile);
+    final vaultDir = await getVaultDirectory(mode);
+    final newFileName = _uuid.v4();
+    final destPath = p.join(vaultDir.path, newFileName);
+    final keyBytes = await _getEncryptionKeyBytes();
+
+    await encryptFileInIsolate(
+      inputPath: platformFile.path!,
+      outputPath: destPath,
+      keyBytes: keyBytes,
+      onProgress: (done, total) => onFileProgress(done),
+    );
 
     final ext = p.extension(platformFile.name).replaceAll('.', '');
     final category = detectCategoryForExtension(ext);
-    final id = p.basename(storedFile.path);
 
     final meta = VaultFileMeta(
-      id: id,
+      id: newFileName,
       originalName: platformFile.name,
-      storedFileName: id,
+      storedFileName: newFileName,
       extension: ext,
       sizeInBytes: platformFile.size,
       categoryIndex: category.index,
@@ -252,31 +231,36 @@ class VaultService {
   Future<List<VaultFileMeta>> importFiles(
     VaultMode mode,
     List<PlatformFile> files, {
-    required void Function(int completed, int total, String currentFileName)
-        onProgress,
+    required void Function(int bytesDone, int totalBytes, String currentFileName) onProgress,
   }) async {
     final results = <VaultFileMeta>[];
+    final totalBytes = files.fold<int>(0, (sum, f) => sum + f.size);
+    int cumulativeBytes = 0;
 
-    for (int i = 0; i < files.length; i++) {
-      onProgress(i, files.length, files[i].name);
+    for (final platformFile in files) {
+      onProgress(cumulativeBytes, totalBytes, platformFile.name);
       try {
-        final meta = await _importSingleFile(mode, files[i]);
+        final meta = await _importSingleFile(
+          mode,
+          platformFile,
+          onFileProgress: (fileBytesDone) {
+            onProgress(cumulativeBytes + fileBytesDone, totalBytes, platformFile.name);
+          },
+        );
         results.add(meta);
       } catch (_) {
-        continue;
+        // skip failed file, continue with the rest
       }
+      cumulativeBytes += platformFile.size;
     }
 
-    onProgress(files.length, files.length, '');
+    onProgress(totalBytes, totalBytes, '');
     return results;
   }
 
   List<VaultFileMeta> getAllFiles(VaultMode mode) => _box(mode).values.toList();
 
-  List<VaultFileMeta> getFilesByCategory(
-    VaultMode mode,
-    VaultCategoryType category,
-  ) =>
+  List<VaultFileMeta> getFilesByCategory(VaultMode mode, VaultCategoryType category) =>
       _box(mode).values.where((f) => f.category == category).toList();
 
   Map<VaultCategoryType, int> getCategoryCounts(VaultMode mode) {
@@ -289,24 +273,27 @@ class VaultService {
 
   Future<Uint8List> getDecryptedBytes(VaultMode mode, String id) async {
     final vaultDir = await getVaultDirectory(mode);
-    final vaultFile = File(p.join(vaultDir.path, id));
-    return readDecryptedBytes(vaultFile);
+    final vaultFilePath = p.join(vaultDir.path, id);
+    final keyBytes = await _getEncryptionKeyBytes();
+    return decryptToBytesInIsolate(inputPath: vaultFilePath, keyBytes: keyBytes);
   }
 
-  Future<File> prepareTempPlaybackFile(
-    VaultMode mode,
-    String id,
-    String extension,
-  ) async {
+  Future<File> prepareTempPlaybackFile(VaultMode mode, String id, String extension) async {
     final vaultDir = await getVaultDirectory(mode);
-    final vaultFile = File(p.join(vaultDir.path, id));
-    final decrypted = await readDecryptedBytes(vaultFile);
+    final vaultFilePath = p.join(vaultDir.path, id);
 
     final tempDir = await getTemporaryDirectory();
     final suffix = extension.isNotEmpty ? '.$extension' : '';
     final tempFile = File(p.join(tempDir.path, '$id$suffix'));
 
-    await tempFile.writeAsBytes(decrypted, flush: true);
+    final keyBytes = await _getEncryptionKeyBytes();
+
+    await decryptFileInIsolate(
+      inputPath: vaultFilePath,
+      outputPath: tempFile.path,
+      keyBytes: keyBytes,
+    );
+
     return tempFile;
   }
 
@@ -316,11 +303,7 @@ class VaultService {
     }
   }
 
-  Future<Uint8List?> getVideoThumbnail(
-    VaultMode mode,
-    String id,
-    String extension,
-  ) async {
+  Future<Uint8List?> getVideoThumbnail(VaultMode mode, String id, String extension) async {
     File? tempFile;
     try {
       tempFile = await prepareTempPlaybackFile(mode, id, extension);

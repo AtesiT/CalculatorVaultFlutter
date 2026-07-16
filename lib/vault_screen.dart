@@ -21,6 +21,17 @@ IconData _iconForCategory(VaultCategoryType type) {
   }
 }
 
+String _formatBytes(int bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  } else if (bytes >= 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  } else if (bytes >= 1024) {
+    return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  }
+  return '$bytes B';
+}
+
 Future<bool> confirmDelete(BuildContext context, int count) async {
   final result = await showDialog<bool>(
     context: context,
@@ -53,11 +64,11 @@ Future<bool> confirmDelete(BuildContext context, int count) async {
 }
 
 class ImportProgress {
-  final int completed;
-  final int total;
+  final int bytesDone;
+  final int totalBytes;
   final String currentFileName;
 
-  const ImportProgress(this.completed, this.total, this.currentFileName);
+  const ImportProgress(this.bytesDone, this.totalBytes, this.currentFileName);
 }
 
 class VaultScreen extends StatefulWidget {
@@ -97,7 +108,8 @@ class _VaultScreenState extends State<VaultScreen> {
     final confirmed = await _showLongOperationWarning(files.length);
     if (confirmed != true) return;
 
-    _importProgress.value = ImportProgress(0, files.length, '');
+    final totalBytes = files.fold<int>(0, (sum, f) => sum + f.size);
+    _importProgress.value = ImportProgress(0, totalBytes, '');
 
     if (!mounted) return;
     showDialog(
@@ -109,8 +121,8 @@ class _VaultScreenState extends State<VaultScreen> {
     final imported = await VaultService.instance.importFiles(
       widget.mode,
       files,
-      onProgress: (completed, total, name) {
-        _importProgress.value = ImportProgress(completed, total, name);
+      onProgress: (bytesDone, total, name) {
+        _importProgress.value = ImportProgress(bytesDone, total, name);
       },
     );
 
@@ -158,7 +170,7 @@ class _VaultScreenState extends State<VaultScreen> {
       valueListenable: _importProgress,
       builder: (context, progress, _) {
         final percent =
-            progress.total == 0 ? 0.0 : progress.completed / progress.total;
+            progress.totalBytes == 0 ? 0.0 : progress.bytesDone / progress.totalBytes;
         return PopScope(
           canPop: false,
           child: Dialog(
@@ -181,7 +193,7 @@ class _VaultScreenState extends State<VaultScreen> {
                   ClipRRect(
                     borderRadius: BorderRadius.circular(8),
                     child: LinearProgressIndicator(
-                      value: percent,
+                      value: percent.clamp(0.0, 1.0),
                       minHeight: 8,
                       backgroundColor: const Color(0xFF2C2C2E),
                       color: const Color(0xFF0A84FF),
@@ -189,8 +201,8 @@ class _VaultScreenState extends State<VaultScreen> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    '${progress.completed} of ${progress.total} '
-                    '(${(percent * 100).toInt()}%)',
+                    '${_formatBytes(progress.bytesDone)} of ${_formatBytes(progress.totalBytes)} '
+                    '(${(percent * 100).clamp(0, 100).toInt()}%)',
                     style: TextStyle(color: Colors.grey[400], fontSize: 13),
                   ),
                   if (progress.currentFileName.isNotEmpty) ...[
