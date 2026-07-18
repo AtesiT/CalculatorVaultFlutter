@@ -326,6 +326,25 @@ class _VaultScreenState extends State<VaultScreen> {
   }
 }
 
+enum SortOption { nameAsc, nameDesc, dateNewest, dateOldest, sizeLargest, sizeSmallest }
+
+String _sortOptionLabel(SortOption option) {
+  switch (option) {
+    case SortOption.nameAsc:
+      return 'Name (A-Z)';
+    case SortOption.nameDesc:
+      return 'Name (Z-A)';
+    case SortOption.dateNewest:
+      return 'Newest first';
+    case SortOption.dateOldest:
+      return 'Oldest first';
+    case SortOption.sizeLargest:
+      return 'Largest first';
+    case SortOption.sizeSmallest:
+      return 'Smallest first';
+  }
+}
+
 class CategoryFilesScreen extends StatefulWidget {
   final VaultCategory category;
   final VaultMode mode;
@@ -344,14 +363,52 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
   bool _selectionMode = false;
   final Set<String> _selectedIds = {};
 
+  bool _searchMode = false;
+  String _searchQuery = '';
+  final _searchController = TextEditingController();
+
+  SortOption _sortOption = SortOption.dateNewest;
+
   bool get _isMediaGrid =>
       widget.category.type == VaultCategoryType.photos ||
       widget.category.type == VaultCategoryType.videos;
+
+  List<VaultFileMeta> get _displayedFiles {
+    var list = _files.where((f) {
+      if (_searchQuery.isEmpty) return true;
+      return f.originalName.toLowerCase().contains(_searchQuery.toLowerCase());
+    }).toList();
+
+    list.sort((a, b) {
+      switch (_sortOption) {
+        case SortOption.nameAsc:
+          return a.originalName.toLowerCase().compareTo(b.originalName.toLowerCase());
+        case SortOption.nameDesc:
+          return b.originalName.toLowerCase().compareTo(a.originalName.toLowerCase());
+        case SortOption.dateNewest:
+          return b.dateAddedMillis.compareTo(a.dateAddedMillis);
+        case SortOption.dateOldest:
+          return a.dateAddedMillis.compareTo(b.dateAddedMillis);
+        case SortOption.sizeLargest:
+          return b.sizeInBytes.compareTo(a.sizeInBytes);
+        case SortOption.sizeSmallest:
+          return a.sizeInBytes.compareTo(b.sizeInBytes);
+      }
+    });
+
+    return list;
+  }
 
   @override
   void initState() {
     super.initState();
     _files = VaultService.instance.getFilesByCategory(widget.mode, widget.category.type);
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   void _enterSelectionMode(String id) {
@@ -376,6 +433,20 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
       } else {
         _selectedIds.add(id);
       }
+    });
+  }
+
+  void _enterSearchMode() {
+    setState(() {
+      _searchMode = true;
+    });
+  }
+
+  void _exitSearchMode() {
+    setState(() {
+      _searchMode = false;
+      _searchQuery = '';
+      _searchController.clear();
     });
   }
 
@@ -411,11 +482,16 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final displayed = _displayedFiles;
+
     return PopScope(
-      canPop: !_selectionMode,
+      canPop: !_selectionMode && !_searchMode,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && _selectionMode) {
+        if (didPop) return;
+        if (_selectionMode) {
           _exitSelectionMode();
+        } else if (_searchMode) {
+          _exitSearchMode();
         }
       },
       child: Scaffold(
@@ -434,7 +510,19 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
                   ],
                 ),
               )
-            : (_isMediaGrid ? _buildMediaGrid() : _buildDocumentList()),
+            : displayed.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.search_off, size: 64, color: Colors.grey[700]),
+                        const SizedBox(height: 16),
+                        Text('No files match your search',
+                            style: TextStyle(color: Colors.grey[500], fontSize: 16)),
+                      ],
+                    ),
+                  )
+                : (_isMediaGrid ? _buildMediaGrid(displayed) : _buildDocumentList(displayed)),
       ),
     );
   }
@@ -443,8 +531,59 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
     return AppBar(
       backgroundColor: const Color(0xFF121212),
       elevation: 0,
-      title: Text(widget.category.label, style: const TextStyle(color: Colors.white)),
+      title: _searchMode
+          ? TextField(
+              controller: _searchController,
+              autofocus: true,
+              style: const TextStyle(color: Colors.white),
+              cursorColor: const Color(0xFF0A84FF),
+              decoration: const InputDecoration(
+                hintText: 'Search files...',
+                hintStyle: TextStyle(color: Colors.grey),
+                border: InputBorder.none,
+              ),
+              onChanged: (value) => setState(() => _searchQuery = value),
+            )
+          : Text(widget.category.label, style: const TextStyle(color: Colors.white)),
       iconTheme: const IconThemeData(color: Colors.white),
+      actions: [
+        if (_searchMode)
+          IconButton(
+            icon: const Icon(Icons.close, color: Colors.white),
+            onPressed: _exitSearchMode,
+          )
+        else ...[
+          IconButton(
+            icon: const Icon(Icons.search, color: Colors.white),
+            onPressed: _enterSearchMode,
+          ),
+          PopupMenuButton<SortOption>(
+            icon: const Icon(Icons.sort, color: Colors.white),
+            color: const Color(0xFF1E1E1E),
+            initialValue: _sortOption,
+            onSelected: (option) => setState(() => _sortOption = option),
+            itemBuilder: (context) => SortOption.values.map((option) {
+              final selected = option == _sortOption;
+              return PopupMenuItem<SortOption>(
+                value: option,
+                child: Row(
+                  children: [
+                    if (selected)
+                      const Icon(Icons.check, color: Color(0xFF0A84FF), size: 18)
+                    else
+                      const SizedBox(width: 18),
+                    const SizedBox(width: 10),
+                    Text(
+                      _sortOptionLabel(option),
+                      style: TextStyle(color: selected ? const Color(0xFF0A84FF) : Colors.white),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+      ],
     );
   }
 
@@ -467,7 +606,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
     );
   }
 
-  Widget _buildMediaGrid() {
+  Widget _buildMediaGrid(List<VaultFileMeta> files) {
     return GridView.builder(
       padding: const EdgeInsets.all(16),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -475,9 +614,9 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
         crossAxisSpacing: 8,
         mainAxisSpacing: 8,
       ),
-      itemCount: _files.length,
+      itemCount: files.length,
       itemBuilder: (context, index) {
-        final meta = _files[index];
+        final meta = files[index];
         final tile = widget.category.type == VaultCategoryType.photos
             ? _buildPhotoTile(meta)
             : _buildVideoTile(meta);
@@ -659,12 +798,12 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
     );
   }
 
-  Widget _buildDocumentList() {
+  Widget _buildDocumentList(List<VaultFileMeta> files) {
     return ListView.builder(
       padding: const EdgeInsets.all(16),
-      itemCount: _files.length,
+      itemCount: files.length,
       itemBuilder: (context, index) {
-        final meta = _files[index];
+        final meta = files[index];
         final selected = _selectedIds.contains(meta.id);
 
         final card = Card(
@@ -685,7 +824,7 @@ class _CategoryFilesScreenState extends State<CategoryFilesScreen> {
               overflow: TextOverflow.ellipsis,
             ),
             subtitle: Text(
-              '${(meta.sizeInBytes / 1024).toStringAsFixed(1)} KB',
+              _formatBytes(meta.sizeInBytes),
               style: const TextStyle(color: Colors.grey),
             ),
             onLongPress: () => _enterSelectionMode(meta.id),
